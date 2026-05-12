@@ -1,5 +1,6 @@
 ---
 name: claude-usage-report
+version: 0.1.0
 description: Claude Code only. Generate a styled Excel report of Claude Code usage by session for a given month or date range. Reads JSONL session logs from ~/.claude/projects/ on the local machine, dedupes events by message.id, summarizes each session via Haiku (`claude -p`), validates totals against ccusage, splits cross-day sessions into per-day rows, and outputs an XLSX to the Desktop. Use this when the user asks for a Claude Code usage report — phrases like "帮我总结X月份我的claude code和本机项目的报告", "总结我X月份的Claude Code使用", "出X月Claude Code报表", "我这个月在Claude里做了什么", "summarize my Claude Code usage for [period]". Not for one-off cost lookups (use ccusage directly).
 ---
 
