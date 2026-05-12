@@ -1,0 +1,14 @@
+# Per-user generated summary cache. Do not check in.
+**/cache/
+**/cache
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Node / Python
+node_modules/
+__pycache__/
+*.pyc
