@@ -132,64 +132,73 @@ function extractSessions(since, until) {
     console.error(`Not found: ${ROOT}`);
     process.exit(1);
   }
+  // Recursively collect all .jsonl files. ccusage walks the same tree, so we must
+  // include subagent files under `<project>/<session>/subagents/agent-*.jsonl`,
+  // otherwise days where all work was in subagents (e.g. 04-03, 04-07) disappear.
+  const jsonlFiles = [];
+  (function walk(dir) {
+    let entries; try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else if (ent.isFile() && ent.name.endsWith(".jsonl")) jsonlFiles.push(p);
+    }
+  })(ROOT);
   const out = [];
-  for (const slug of fs.readdirSync(ROOT)) {
-    const dir = path.join(ROOT, slug);
-    let stat; try { stat = fs.statSync(dir); } catch { continue; }
-    if (!stat.isDirectory()) continue;
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith(".jsonl")) continue;
-      const lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n").filter(x=>x.trim());
-      let cwd = null, branch = null;
-      const buckets = new Map(); // YYYY-MM-DD -> { tokens, userMsgs, userMsgTimes, eventTimes }
-      const seen = new Set();    // session-wide message.id dedup
-      for (const ln of lines) {
-        let ev; try { ev = JSON.parse(ln); } catch { continue; }
-        if (ev.cwd && !cwd) cwd = ev.cwd;
-        if (ev.gitBranch && !branch) branch = ev.gitBranch;
-        const ts = ev.timestamp;
-        if (!ts || ts < since || ts >= until) continue;
-        const date = ts.slice(0, 10);
-        let b = buckets.get(date);
-        if (!b) {
-          b = { tokens: 0, userMsgs: [], userMsgTimes: [], eventTimes: [] };
-          buckets.set(date, b);
-        }
-        b.eventTimes.push(ts);
-        if (isRealUserMsg(ev)) {
-          b.userMsgs.push(userText(ev).trim().replace(/\s+/g, " "));
-          b.userMsgTimes.push(ts);
-        }
-        if (ev.type === "assistant" && ev.message && ev.message.usage && ev.message.id) {
-          if (seen.has(ev.message.id)) continue;
-          seen.add(ev.message.id);
-          const u = ev.message.usage;
-          b.tokens += (u.input_tokens||0) + (u.output_tokens||0) + (u.cache_creation_input_tokens||0) + (u.cache_read_input_tokens||0);
-        }
+  for (const fullPath of jsonlFiles) {
+    const lines = fs.readFileSync(fullPath, "utf8").split("\n").filter(x=>x.trim());
+    let cwd = null, branch = null;
+    const buckets = new Map(); // YYYY-MM-DD -> { tokens, userMsgs, userMsgTimes, eventTimes }
+    const seen = new Set();    // session-wide message.id dedup
+    for (const ln of lines) {
+      let ev; try { ev = JSON.parse(ln); } catch { continue; }
+      if (ev.cwd && !cwd) cwd = ev.cwd;
+      if (ev.gitBranch && !branch) branch = ev.gitBranch;
+      const ts = ev.timestamp;
+      if (!ts || ts < since || ts >= until) continue;
+      const date = ts.slice(0, 10);
+      let b = buckets.get(date);
+      if (!b) {
+        b = { tokens: 0, userMsgs: [], userMsgTimes: [], eventTimes: [] };
+        buckets.set(date, b);
       }
-      const sessionFile = f.replace(".jsonl", "");
-      const datesWithUserMsg = new Set(
-        [...buckets.entries()].filter(([, b]) => b.userMsgs.length > 0).map(([d]) => d)
-      );
-      for (const [date, b] of buckets) {
-        // Lower threshold for per-day buckets (one session split into N days, each day is smaller).
-        if (b.tokens < 50e3) continue;
-        b.eventTimes.sort();
-        const firstTs = b.eventTimes[0];
-        const lastTs = b.eventTimes[b.eventTimes.length - 1];
-        out.push({
-          date,
-          firstTs,
-          lastTs,
-          cwd, branch,
-          tokens: b.tokens,
-          userMsgs: b.userMsgs,
-          sessionFile,
-          // True if this date has zero new user messages but is part of a session that
-          // had user messages on an earlier date — i.e., agent/tool continuation.
-          isContinuation: b.userMsgs.length === 0 && datesWithUserMsg.size > 0,
-        });
+      b.eventTimes.push(ts);
+      if (isRealUserMsg(ev)) {
+        b.userMsgs.push(userText(ev).trim().replace(/\s+/g, " "));
+        b.userMsgTimes.push(ts);
       }
+      if (ev.type === "assistant" && ev.message && ev.message.usage && ev.message.id) {
+        if (seen.has(ev.message.id)) continue;
+        seen.add(ev.message.id);
+        const u = ev.message.usage;
+        b.tokens += (u.input_tokens||0) + (u.output_tokens||0) + (u.cache_creation_input_tokens||0) + (u.cache_read_input_tokens||0);
+      }
+    }
+    // Use the path relative to ROOT (sans .jsonl) so a subagent file like
+    // `<project>/<parent>/subagents/agent-XX` doesn't collide with the parent.
+    const sessionFile = path.relative(ROOT, fullPath).replace(/\.jsonl$/, "");
+    const datesWithUserMsg = new Set(
+      [...buckets.entries()].filter(([, b]) => b.userMsgs.length > 0).map(([d]) => d)
+    );
+    for (const [date, b] of buckets) {
+      // Keep parity with ccusage: include any day with measured tokens (subagents
+      // and brief sessions can be well under 50k but still real activity).
+      if (b.tokens <= 0) continue;
+      b.eventTimes.sort();
+      const firstTs = b.eventTimes[0];
+      const lastTs = b.eventTimes[b.eventTimes.length - 1];
+      out.push({
+        date,
+        firstTs,
+        lastTs,
+        cwd, branch,
+        tokens: b.tokens,
+        userMsgs: b.userMsgs,
+        sessionFile,
+        // True if this date has zero new user messages but is part of a session that
+        // had user messages on an earlier date — i.e., agent/tool continuation.
+        isContinuation: b.userMsgs.length === 0 && datesWithUserMsg.size > 0,
+      });
     }
   }
   return out;
